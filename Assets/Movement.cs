@@ -6,40 +6,32 @@ public class Movement : MonoBehaviour
 {
     public bool drawCircle = false;
 
-    float theta_scale = 0.01f;        //Set lower to add more points
-    int size; //Total number of points in circle
+    float theta_scale = 0.01f;
+    int size;
     float radius = 3f;
     LineRenderer lineRenderer;
 
-    public float angleToGo;
-
     float fishCollisionSpeed = 0.7f;
 
-    float seeDistance = 1f;
+    float baseAwayStrength = 1;
+    float baseWithStrength = 1;
+    float baseTowardsStrength = 1;
 
-    float awayStength = 1;
-    float withStrength = 1;
-    float towardsStrength = 1;
-    float avoidWallStrength = 10f;
+    float awayStength = 2;
+    float withStrength = 2;
+    float towardsStrength = 2;
 
-    [HideInInspector]
-    public bool moveAway = true;
-    [HideInInspector]
-    public bool moveWith = true;
-    [HideInInspector]
-    public bool moveToward = true;
-    
+    [HideInInspector] public bool moveAway = true;
+    [HideInInspector] public bool moveWith = true;
+    [HideInInspector] public bool moveToward = true;
+
     public bool inMyControl;
 
-    [HideInInspector]
-    public Vector2 lookDir;
+    [HideInInspector] public Vector2 lookDir;
 
     bool canTeleport = true;
-
     Vector2 mousePos;
-
     float distance;
-
     bool hitBox = true;
 
     GameObject nearest;
@@ -48,39 +40,82 @@ public class Movement : MonoBehaviour
     Vector2 awayLookDir = Vector2.zero;
     Vector2 radiusLookDir = Vector2.zero;
     Vector2 towardLookDir = Vector2.zero;
+
     float awayLookDirMulti;
     float radiusLookDirMulti;
     float towardLookDirMulti;
 
-    float colorChange = 0.03f;
-    float maxDistanceOfOther = 1.5f;
+    float colorChange = 0.5f;
+    float maxDistanceOfOther = 3.0f;
     float xPerimeter = 14f;
     float yPerimeter = 8f;
     float rotationSpeed = 0.12f;
+    float baseSpeed = 0.04f;
     float speed = 0.04f;
 
     float zRot;
     Vector2 moddedPos;
     float rotationAdjustment;
 
+    private static float[] spectrumData = new float[512];
+    private static float bassFreq, midFreq, highFreq;
+    private static Vector2 waveCenter = Vector2.zero;
+    private static float waveTime = 0f;
+
+    float debugTimer = 1f;
+
     private void Start()
     {
         zRot = Random.Range(0, 360);
     }
 
-    void Awake(){
-        float sizeValue = (2.0f * Mathf.PI) / theta_scale; 
+    void Awake()
+    {
+        float sizeValue = (2.0f * Mathf.PI) / theta_scale;
         size = (int)sizeValue;
         size++;
         lineRenderer = gameObject.AddComponent<LineRenderer>();
-        //lineRenderer.material = new Material(Shader.Find("Particles/Additive"));
-        lineRenderer.SetWidth(0.02f, 0.02f); //thickness of line
-        lineRenderer.SetVertexCount(size);
+        lineRenderer.startWidth = 0.02f;
+        lineRenderer.endWidth = 0.02f;
+        lineRenderer.positionCount = size;
     }
 
     void Update()
     {
         radius = distance;
+
+        AudioListener.GetSpectrumData(spectrumData, 0, FFTWindow.BlackmanHarris);
+
+        bassFreq = GetFrequencyBand(0, 2);
+        midFreq = GetFrequencyBand(2, 5);
+        highFreq = GetFrequencyBand(5, 12);
+
+        float total = bassFreq + midFreq + highFreq;
+        if (total > 0.01f)
+        {
+            bassFreq = (bassFreq / total) * 3f;
+            midFreq = (midFreq / total) * 3f;
+            highFreq = (highFreq / total) * 3f;
+        }
+
+        awayStength = baseAwayStrength * (1f + bassFreq * 100);
+        withStrength = baseWithStrength * (1f + midFreq * 100);
+        towardsStrength = baseTowardsStrength * (1f + highFreq * 100);
+
+        // --- Fixed Debugging Output ---
+        debugTimer += Time.deltaTime;
+        if (debugTimer >= 1f)
+        {
+            Debug.LogFormat(
+                "{0}: bass={1:F3}, mid={2:F3}, high={3:F3}, away={4:F2}, with={5:F2}, toward={6:F2}",
+                gameObject.name,
+                bassFreq, midFreq, highFreq,
+                awayStength, withStrength, towardsStrength
+            );
+            debugTimer = 0f;
+        }
+
+        waveTime += Time.deltaTime * 5f;
 
         if (drawCircle)
         {
@@ -91,79 +126,161 @@ public class Movement : MonoBehaviour
                 theta += (2.0f * Mathf.PI * theta_scale);
                 float x = radius * Mathf.Cos(theta);
                 float y = radius * Mathf.Sin(theta);
-                x += gameObject.transform.position.x;
-                y += gameObject.transform.position.y;
+                x += transform.position.x;
+                y += transform.position.y;
                 pos = new Vector3(x, y, 0);
                 lineRenderer.SetPosition(i, pos);
             }
         }
-        
-        /*if (canTeleport) {
 
-            if (transform.position.y > yPerimeter)
-            {
-                moddedPos = new Vector2(transform.position.x, -yPerimeter);
-                transform.position = moddedPos;
-                canTeleport = false;
-                StartCoroutine(TeleportTimer());
-            }
+        HandleTeleportBounds();
+        HandleAgents();
+        UpdateColor();
+        HandleMouse();
+        UpdateSpeed();
+    }
 
-            if (transform.position.y < -yPerimeter)
-            {
-                moddedPos = new Vector2(transform.position.x, yPerimeter);
-                transform.position = moddedPos;
-                canTeleport = false;
-                StartCoroutine(TeleportTimer());
-            }
+    private void FixedUpdate()
+    {
+        lookDir = Vector2.Lerp(
+            lookDir,
+            (awayLookDir.normalized * awayLookDirMulti * awayStength) +
+            (radiusLookDir * radiusLookDirMulti * withStrength) +
+            (towardLookDir.normalized * towardLookDirMulti * towardsStrength) +
+            mousePos,
+            0.15f
+        );
 
-            if (transform.position.x > xPerimeter)
-            {
-                moddedPos = new Vector2(-xPerimeter, transform.position.y);
-                transform.position = moddedPos;
-                canTeleport = false;
-                StartCoroutine(TeleportTimer());
-            }
+        float angle = Mathf.Atan2(lookDir.y, lookDir.x) * Mathf.Rad2Deg - 90f;
 
-            if (transform.position.x < -xPerimeter)
-            {
-                moddedPos = new Vector2(xPerimeter, transform.position.y);
-                transform.position = moddedPos;
-                canTeleport = false;
-                StartCoroutine(TeleportTimer());
-            }
+        if (transform.InverseTransformDirection(lookDir).x > 0)
+            rotationAdjustment = Quaternion.Angle(transform.rotation, Quaternion.Euler(0f, 0f, angle));
+        else if (transform.InverseTransformDirection(lookDir).x < 0)
+            rotationAdjustment = -Quaternion.Angle(transform.rotation, Quaternion.Euler(0f, 0f, angle));
 
-        } */
+        zRot = rotationAdjustment * rotationSpeed;
+        transform.rotation = Quaternion.Euler(transform.eulerAngles + new Vector3(0, 0, zRot));
 
+        if (distance < 0.2f && hitBox)
+        {
+            if (nearest != null)
+                transform.position += (transform.position - nearest.transform.position) / 20 +
+                                      (transform.up * speed * fishCollisionSpeed);
+        }
+        else
+        {
+            transform.position += transform.up * speed;
+        }
+    }
+
+    void HandleAgents()
+    {
         agentsAll = GameObject.FindGameObjectsWithTag("Agent");
-
         nearest = GetClosestEnemy(agentsAll);
-        //find awaylookdir, radiuslookdir, and towardlookdir vectors
+
+        // reset accumulation per frame
+        awayLookDir = Vector2.zero;
+        radiusLookDir = Vector2.zero;
+        towardLookDir = Vector2.zero;
+
         foreach (GameObject agent in agentsAll)
         {
-            if ((agent.transform.position - transform.position).magnitude <= maxDistanceOfOther)
+            if (agent == gameObject) continue;
+
+            float dist = (agent.transform.position - transform.position).magnitude;
+            if (dist <= maxDistanceOfOther)
             {
-                awayLookDir = awayLookDir + ( (new Vector2(agent.transform.position.x, agent.transform.position.y) - new Vector2(transform.position.x, transform.position.y)) * (maxDistanceOfOther - (agent.transform.position - transform.position).magnitude ) );
-                radiusLookDir = ( radiusLookDir + (radiusLookDir + (agent.GetComponent<Movement>().lookDir)) ).normalized;
-                towardLookDir = ( towardLookDir + (new Vector2(transform.position.x, transform.position.y) - new Vector2(agent.transform.position.x, agent.transform.position.y)).normalized ).normalized;
+                Vector2 dirToAgent = (Vector2)(agent.transform.position - transform.position);
+
+                awayLookDir += dirToAgent * (maxDistanceOfOther - dist);
+                radiusLookDir += agent.GetComponent<Movement>().lookDir;
+                towardLookDir += (-dirToAgent).normalized;
             }
-
-            if (nearest != null) distance = Vector2.Distance(transform.position, nearest.transform.position);
-            else distance = 0;
         }
-        //get weights to smoothly transition between them
-        if (moveAway) awayLookDirMulti = Mathf.Clamp(0.8f - Mathf.Pow(distance*3, 2), 0f, 0.5f);
-        else awayLookDirMulti = 0;
-        if (moveWith)radiusLookDirMulti = Mathf.Clamp(2*Mathf.Clamp(0.5f-distance, 0f, 0.25f) + 2*Mathf.Clamp(distance-0.5f, 0f, 0.25f), 0f, 0.5f);
-        else radiusLookDirMulti = 0;
-        if (moveToward)towardLookDirMulti = Mathf.Clamp(distance - 0.8f, 0f, 0.5f);
-        else towardLookDirMulti = 0;
 
-        //changing color depending on what its doing
-        if (inMyControl) GetComponentInChildren<SpriteRenderer>().material.color = new Color(Mathf.Lerp(GetComponentInChildren<SpriteRenderer>().material.color.r, 1, colorChange), Mathf.Lerp(GetComponentInChildren<SpriteRenderer>().material.color.g, 1, colorChange), Mathf.Lerp(GetComponentInChildren<SpriteRenderer>().material.color.b, 1, colorChange));
-        else if (distance < 0.2f) GetComponentInChildren<SpriteRenderer>().material.color = new Color(Mathf.Lerp(GetComponentInChildren<SpriteRenderer>().material.color.r, 1, colorChange), Mathf.Lerp(GetComponentInChildren<SpriteRenderer>().material.color.g, 0, colorChange), Mathf.Lerp(GetComponentInChildren<SpriteRenderer>().material.color.b, 0, colorChange));
-        else if (distance < 0.6) GetComponentInChildren<SpriteRenderer>().material.color = new Color(Mathf.Lerp(GetComponentInChildren<SpriteRenderer>().material.color.r, 0, colorChange), Mathf.Lerp(GetComponentInChildren<SpriteRenderer>().material.color.g, 1, colorChange), Mathf.Lerp(GetComponentInChildren<SpriteRenderer>().material.color.b, 0, colorChange));
-        else GetComponentInChildren<SpriteRenderer>().material.color = new Color(Mathf.Lerp(GetComponentInChildren<SpriteRenderer>().material.color.r, 0, colorChange), Mathf.Lerp(GetComponentInChildren<SpriteRenderer>().material.color.g, 0, colorChange), Mathf.Lerp(GetComponentInChildren<SpriteRenderer>().material.color.b, 1, colorChange));
-        //get mouse position
+        // normalize safely
+        if (awayLookDir != Vector2.zero) awayLookDir.Normalize();
+        if (radiusLookDir != Vector2.zero) radiusLookDir.Normalize();
+        if (towardLookDir != Vector2.zero) towardLookDir.Normalize();
+
+        if (nearest != null) distance = Vector2.Distance(transform.position, nearest.transform.position);
+        else distance = 0;
+
+        if (moveAway) awayLookDirMulti = Mathf.Clamp(1.2f - Mathf.Pow(distance * 2, 2), 0f, 1f);
+        else awayLookDirMulti = 0;
+
+        if (moveWith)
+            radiusLookDirMulti = Mathf.Clamp(
+                3 * Mathf.Clamp(0.5f - distance, 0f, 0.5f) +
+                3 * Mathf.Clamp(distance - 0.5f, 0f, 0.5f), 0f, 1f);
+        else radiusLookDirMulti = 0;
+
+        if (moveToward) towardLookDirMulti = Mathf.Clamp(distance - 0.5f, 0f, 1f);
+        else towardLookDirMulti = 0;
+    }
+
+    void HandleTeleportBounds()
+    {
+        if (!canTeleport) return;
+
+        Vector2 pos = transform.position;
+        if (pos.y > yPerimeter) pos.y = -yPerimeter;
+        else if (pos.y < -yPerimeter) pos.y = yPerimeter;
+
+        if (pos.x > xPerimeter) pos.x = -xPerimeter;
+        else if (pos.x < -xPerimeter) pos.x = xPerimeter;
+
+        if ((Vector2)transform.position != pos)
+        {
+            transform.position = pos;
+            canTeleport = false;
+            StartCoroutine(TeleportTimer());
+        }
+    }
+
+    void UpdateColor()
+    {
+        SpriteRenderer spriteRenderer = GetComponentInChildren<SpriteRenderer>();
+        if (spriteRenderer == null) return;
+
+        Color targetColor;
+        if (inMyControl)
+        {
+            targetColor = Color.white;
+        }
+        else
+        {
+            float distFromCenter = Vector2.Distance(transform.position, waveCenter);
+            float bassPhase = (distFromCenter * 0.3f) - waveTime;
+            float midPhase = (distFromCenter * 0.5f) - (waveTime * 1.2f);
+            float highPhase = (distFromCenter * 0.7f) - (waveTime * 1.5f);
+
+            float bassWave = Mathf.Sin(bassPhase) * 0.5f + 0.5f;
+            float midWave = Mathf.Sin(midPhase) * 0.5f + 0.5f;
+            float highWave = Mathf.Sin(highPhase) * 0.5f + 0.5f;
+
+            float r = Mathf.Clamp01(bassFreq * bassWave);
+            float g = Mathf.Clamp01(midFreq * midWave);
+            float b = Mathf.Clamp01(highFreq * highWave);
+
+            targetColor = new Color(r, g, b);
+
+            float maxComponent = Mathf.Max(r, g, b);
+            if (maxComponent > 0.1f)
+            {
+                targetColor = new Color(r / maxComponent, g / maxComponent, b / maxComponent) * maxComponent;
+            }
+            else
+            {
+                targetColor = new Color(0.15f, 0.15f, 0.15f);
+            }
+        }
+
+        spriteRenderer.material.color = Color.Lerp(spriteRenderer.material.color, targetColor, colorChange);
+    }
+
+    void HandleMouse()
+    {
         if (inMyControl)
         {
             mousePos = (-(Camera.main.ScreenToWorldPoint(Input.mousePosition) - transform.position) / 5).normalized * 5;
@@ -178,29 +295,22 @@ public class Movement : MonoBehaviour
         }
     }
 
-    private void FixedUpdate()
-    { //set the rotation and move forwards
-        lookDir = Vector2.Lerp(lookDir, (FindUnobstructedDirection()*avoidWallStrength + awayLookDir.normalized*awayLookDirMulti*awayStength + radiusLookDir*radiusLookDirMulti*withStrength + towardLookDir*towardLookDirMulti*towardsStrength).normalized + mousePos, 0.1f);
+    void UpdateSpeed()
+    {
+        float audioBoost = (bassFreq + midFreq + highFreq) / 10f;
+        speed = baseSpeed * (1f + Mathf.Clamp01(audioBoost));
+    }
 
-        float angle = Mathf.Atan2(lookDir.y, lookDir.x) * Mathf.Rad2Deg - 90f;
-
-        if (transform.InverseTransformDirection(lookDir).x > 0)
+    float GetFrequencyBand(int startIndex, int endIndex)
+    {
+        float average = 0;
+        int count = 0;
+        for (int i = startIndex; i < endIndex && i < spectrumData.Length; i++)
         {
-            rotationAdjustment = Quaternion.Angle(transform.rotation, Quaternion.Euler(0f, 0f, angle));
+            average += spectrumData[i];
+            count++;
         }
-        else if (transform.InverseTransformDirection(lookDir).x < 0)
-        {
-            rotationAdjustment = -Quaternion.Angle(transform.rotation, Quaternion.Euler(0f, 0f, angle));
-        }
-
-        zRot = (rotationAdjustment * rotationSpeed);
-        transform.rotation = Quaternion.Euler(transform.eulerAngles + new Vector3(0, 0, zRot));
-        //stops them from getting super close
-        if (distance < 0.2f && hitBox) {
-            if (nearest != null) transform.position = transform.position + (transform.position-nearest.transform.position)/20 + (transform.up * speed * fishCollisionSpeed);
-        } else {
-            transform.position = transform.position + (transform.up * speed);
-        }
+        return count > 0 ? (average / count) : 0;
     }
 
     GameObject GetClosestEnemy(GameObject[] enemies)
@@ -211,12 +321,11 @@ public class Movement : MonoBehaviour
         foreach (GameObject t in enemies)
         {
             float dist = Vector3.Distance(t.transform.position, currentPos);
-            if ((dist < minDist) && (t.transform.position != transform.position))
+            if (dist < minDist && t.transform.position != transform.position)
             {
                 tMin = t;
                 minDist = dist;
             }
-
         }
         return tMin;
     }
@@ -225,50 +334,5 @@ public class Movement : MonoBehaviour
     {
         yield return new WaitForSeconds(2);
         canTeleport = true;
-    }
-
-    Vector2 FindUnobstructedDirection () {
-        Vector2 direction = Vector2.zero;
-        Vector2 right = new Vector2(transform.right.x, transform.right.y);
-
-        int angle = 9; //10 is forwards, 0 is right, -10 is backwards
-
-        while (ScanThisAngle(angle) == Vector2.zero){
-            angle--;
-            if (angle == -10) { angle = -10; break; }
-        }
-
-        angleToGo = angle;
-
-        direction = ScanThisAngle(angle);
-
-        return direction.normalized;
-    }
-
-    Vector2 ScanThisAngle (int angle) {
-        Vector2 pos = new Vector2(transform.position.x, transform.position.y);
-
-        RaycastHit2D hitRightSide = Physics2D.Raycast(transform.position, 
-        (transform.up * angle + transform.right * (10 - Mathf.Abs(angle))).normalized, 
-        seeDistance);
-
-        RaycastHit2D hitLeftSide = Physics2D.Raycast(transform.position, 
-        (transform.up * angle - transform.right * (10 - Mathf.Abs(angle))).normalized, 
-        seeDistance);
-
-        if (angle < -9 && hitRightSide.collider != null && hitLeftSide.collider != null) return new Vector2(transform.right.x, transform.right.y); 
-
-        if (hitRightSide.collider != null && hitLeftSide.collider != null) {
-            return Vector2.zero;
-        }
-        else if (hitLeftSide.collider == null && hitRightSide.collider != null) {
-            //return (pos - hitLeftSide.point).normalized;
-            return new Vector2(transform.right.x, transform.right.y);
-        }
-        else if (hitRightSide.collider == null && hitLeftSide.collider != null) {
-            //return (pos - hitRightSide.point).normalized;
-            return new Vector2(-transform.right.x, -transform.right.y);
-        }
-        else return Vector2.zero;
     }
 }
