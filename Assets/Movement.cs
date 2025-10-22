@@ -101,7 +101,7 @@ public class Movement : MonoBehaviour
 
         awayStength = baseAwayStrength * Mathf.Pow(bassFreq * 10f, 3f);
         withStrength = baseWithStrength * Mathf.Pow(midFreq * 10f, 3f);
-        towardsStrength = baseTowardsStrength * Mathf.Pow(highFreq * 10f, 2f);
+        towardsStrength = baseTowardsStrength * Mathf.Pow(highFreq * 10f, 3f);
 
         debugTimer += Time.deltaTime;
         if (debugTimer >= 1f) // every second, output freq and strengths
